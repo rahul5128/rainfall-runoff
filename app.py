@@ -34,11 +34,12 @@ def calc_nse(obs, sim):
 
 def create_features(df, date_col, input_cols):
     df = df.copy()
-    # 1. Seasonal trigonometric encoding from original script
+    
+    # 1. Cyclical seasonal encoding on Date
     df['day_sin'] = np.sin(2 * np.pi * df[date_col].dt.dayofyear / 365.25)
     df['day_cos'] = np.cos(2 * np.pi * df[date_col].dt.dayofyear / 365.25)
     
-    # 2. Lags (1 to 3) and Rolling Accumulations (3 and 7) for input columns
+    # 2. Lag (1-3) and Rolling sums (3, 7) for ALL selected input features
     for col in input_cols:
         for lag in range(1, 4):
             df[f'{col}_lag{lag}'] = df[col].shift(lag)
@@ -99,23 +100,23 @@ def physics_informed_loss(output, target):
     return mse + (0.5 * peak_penalty)
 
 # =========================
-# USER INTERFACE
+# APPLICATION INTERFACE
 # =========================
 st.title("🌊 Universal Hydrological & Time-Series Model Predictor")
-st.caption("Custom sequence & tabular models with native parameter mapping")
+st.caption("End-to-end framework for hydrological sequence & tabular modeling")
 
 st.subheader("1. Training & Validation")
 train_file = st.file_uploader("Upload Training Data (CSV or Excel)", type=['csv', 'xlsx'], key="train")
 
 if train_file:
-    df = pd.read_csv(train_file) if train_file.name.endswith('.csv') else pd.read_excel(train_file)
-    cols = df.columns.tolist()
+    df_raw = pd.read_csv(train_file) if train_file.name.endswith('.csv') else pd.read_excel(train_file)
+    cols = df_raw.columns.tolist()
 
     st.write("---")
-    st.write("### 📌 Step 1: Model Selection & Hyperparameters")
-    col_m1, col_m2 = st.columns([1, 2])
+    st.write("### 📌 Configuration & Parameter Tuning")
+    c_m1, c_m2 = st.columns([1, 2])
     
-    with col_m1:
+    with c_m1:
         model_type = st.selectbox(
             "1. Select Model",
             [
@@ -126,7 +127,7 @@ if train_file:
             ]
         )
     
-    with col_m2:
+    with c_m2:
         with st.expander(f"⚙️ 2. Modify Hyperparameters for {model_type}", expanded=True):
             if model_type == "HistGradientBoosting":
                 hgb_iter = st.number_input("max_iter", value=500, step=50)
@@ -180,12 +181,11 @@ if train_file:
                 mlp_iter = st.number_input("Max Iterations", value=500, step=50)
 
     st.write("---")
-    st.write("### 📌 Step 2: Column Mapping (From Uploaded File)")
+    st.write("### 📌 Column Mapping")
     c3, c4, c5 = st.columns(3)
     
     # 3. Date Dropdown
-    date_default = 0
-    date_col = c3.selectbox("3. Select Date Column", cols, index=date_default)
+    date_col = c3.selectbox("3. Select Date Column", cols, index=0)
     
     # 5. Target Dropdown
     target_matches = [i for i, c in enumerate(cols) if 'discharge' in c.lower() or 'target' in c.lower()]
@@ -193,32 +193,45 @@ if train_file:
     target_col = c5.selectbox("5. Select Target Column", cols, index=target_default)
 
     # 4. Input Features Dropdown
-    input_defaults = [c for c in cols if c not in [date_col, target_col] and ('rain' in c.lower() or 'temp' in c.lower() or 't_' in c.lower())]
-    if not input_defaults:
-        input_defaults = [c for c in cols if c not in [date_col, target_col]]
-    input_cols = c4.multiselect("4. Select Input Features", [c for c in cols if c not in [date_col, target_col]], default=input_defaults)
+    default_inputs = [c for c in cols if c not in [date_col, target_col, 'Water Level(m)']]
+    input_cols = c4.multiselect(
+        "4. Select Input Features",
+        [c for c in cols if c not in [date_col, target_col]],
+        default=default_inputs
+    )
 
     # =========================
-    # MODEL EXECUTION PIPELINE
+    # TRAINING WORKFLOW
     # =========================
     if st.button("🚀 Train & Evaluate Model", type="primary"):
         if not input_cols:
             st.error("Please select at least one Input Feature.")
         else:
-            with st.spinner(f"Preparing data and training {model_type}..."):
-                # Clean dates and target
+            with st.spinner(f"Processing features and training {model_type}..."):
+                # Clean dataframe: sort chronologically and drop missing targets first
+                df = df_raw.copy()
                 df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-                df[target_col] = pd.to_numeric(df[target_col], errors='coerce')
-                df = df.dropna(subset=[date_col, target_col]).sort_values(date_col).reset_index(drop=True)
+                df = df.sort_values(date_col)
+                df = df.dropna(subset=[target_col]).reset_index(drop=True)
+                
+                # Create lag and rolling sum features for ALL selected input features
+                df_feat = create_features(df, date_col, input_cols)
+                df_clean = df_feat.dropna().reset_index(drop=True)
+
+                # Collect all generated feature names
+                engineered_cols = ['day_sin', 'day_cos']
+                for col in input_cols:
+                    engineered_cols.append(col)
+                    for lag in range(1, 4):
+                        engineered_cols.append(f'{col}_lag{lag}')
+                    engineered_cols.append(f'{col}_sum3')
+                    engineered_cols.append(f'{col}_sum7')
 
                 is_sequence_model = model_type in ["HydroAttentionNet", "CNN-LSTM", "LSTM", "GRU", "Transformer"]
 
                 if not is_sequence_model:
-                    # Tabular Pipeline (HistGradientBoosting, RF, XGB, LGB, SVR, KNN, ANN)
-                    df_feat = create_features(df, date_col, input_cols)
-                    df_clean = df_feat.dropna().reset_index(drop=True)
-
-                    X = df_clean.drop(columns=[date_col, target_col], errors='ignore')
+                    # Tabular Pipeline (HistGradientBoosting, RF, XGBoost, LightGBM, SVR, KNN, ANN)
+                    X = df_clean[engineered_cols]
                     y = df_clean[target_col].values
 
                     split = int(len(df_clean) * 0.8)
@@ -276,19 +289,16 @@ if train_file:
                     st.session_state['trained_model'] = model
                     st.session_state['scaler_x'] = scaler_x
                     st.session_state['scaler_y'] = None
+                    st.session_state['feature_cols'] = engineered_cols
 
                 else:
-                    # Sequence Deep Learning Pipeline
-                    df_seq = df.copy()
-                    df_seq['day_sin'] = np.sin(2 * np.pi * df_seq[date_col].dt.dayofyear / 365.25)
-                    df_seq['day_cos'] = np.cos(2 * np.pi * df_seq[date_col].dt.dayofyear / 365.25)
-
-                    raw_features = list(input_cols) + ['day_sin', 'day_cos']
+                    # Deep Learning Sequence Pipeline
                     scaler_x = StandardScaler()
                     scaler_y = StandardScaler()
 
-                    X_scaled = scaler_x.fit_transform(df_seq[raw_features])
-                    y_scaled = scaler_y.fit_transform(df_seq[[target_col]])
+                    raw_features = list(input_cols) + ['day_sin', 'day_cos']
+                    X_scaled = scaler_x.fit_transform(df_clean[raw_features])
+                    y_scaled = scaler_y.fit_transform(df_clean[[target_col]])
 
                     win = int(window_size)
                     X_seq, y_seq = create_sequences(X_scaled, y_scaled, win)
@@ -296,7 +306,7 @@ if train_file:
                     split_seq = int(len(X_seq) * 0.8)
                     X_train, X_test = X_seq[:split_seq], X_seq[split_seq:]
                     y_train, y_test_sc = y_seq[:split_seq], y_seq[split_seq:]
-                    eval_dates = df_seq[date_col].iloc[win + split_seq:].reset_index(drop=True)
+                    eval_dates = df_clean[date_col].iloc[win + split_seq:].reset_index(drop=True)
 
                     if model_type == "HydroAttentionNet":
                         X_train_torch = torch.FloatTensor(X_train)
@@ -389,28 +399,27 @@ if train_file:
                     st.session_state['scaler_x'] = scaler_x
                     st.session_state['scaler_y'] = scaler_y
                     st.session_state['window_size'] = win
+                    st.session_state['raw_features'] = raw_features
 
-                # Save session states for inference
                 st.session_state['model_type'] = model_type
                 st.session_state['date_col'] = date_col
                 st.session_state['target_col'] = target_col
                 st.session_state['input_cols'] = input_cols
                 st.session_state['is_sequence_model'] = is_sequence_model
 
-                # Metrics
+                # Metrics calculation on the 20% validation split
                 r2 = r2_score(y_test, y_pred)
                 nse = calc_nse(y_test, y_pred)
                 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
                 mae = mean_absolute_error(y_test, y_pred)
 
-                st.success(f"Model Training Complete! Architecture: {model_type}")
+                st.success(f"Training Complete! Selected Model: {model_type}")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("R² Score", round(r2, 4))
                 m2.metric("NSE", round(nse, 4))
                 m3.metric("RMSE", round(rmse, 2))
                 m4.metric("MAE", round(mae, 2))
 
-                # Chart
                 fig, ax = plt.subplots(figsize=(14, 4))
                 fig.patch.set_facecolor('#0e1117')
                 ax.set_facecolor('#0e1117')
@@ -421,46 +430,42 @@ if train_file:
                 ax.legend(facecolor='#0e1117', labelcolor='white')
                 st.pyplot(fig)
 
-# =========================================================
-# PHASE 2: GENERATE TARGET (INFERENCE ON NEW DATA)
-# =========================================================
+# =========================
+# PHASE 2: GENERATE TARGET
+# =========================
 st.write("---")
-st.subheader("2. Generate Target (Predict on New File)")
+st.subheader("2. Generate Target for New Data")
 
 if 'trained_model' not in st.session_state:
-    st.info("Train a model above first. Once trained, you can upload new input data here to generate target predictions.")
+    st.info("Train a model above first to unlock target generation.")
 else:
     st.write(f"Active Model: **{st.session_state['model_type']}**")
-    st.write(f"Expected Input Features: `{st.session_state['input_cols']}`")
-    
-    new_file = st.file_uploader("Upload New Dataset with Same Input Features (CSV/Excel)", type=['csv', 'xlsx'], key="pred")
+    new_file = st.file_uploader("Upload New Unseen Dataset (CSV/Excel)", type=['csv', 'xlsx'], key="pred")
     
     if new_file:
         pred_df = pd.read_csv(new_file) if new_file.name.endswith('.csv') else pd.read_excel(new_file)
-        
         date_c = st.session_state['date_col']
         in_cols = st.session_state['input_cols']
         target_name = st.session_state['target_col']
         model = st.session_state['trained_model']
         model_type = st.session_state['model_type']
         
-        missing_inputs = [c for c in in_cols if c not in pred_df.columns]
+        missing = [c for c in in_cols if c not in pred_df.columns]
         
         if date_c not in pred_df.columns:
-            st.error(f"Missing date column '{date_c}' in uploaded file.")
-        elif missing_inputs:
-            st.error(f"Missing required input features in file: {missing_inputs}")
+            st.error(f"Missing date column '{date_c}' in file.")
+        elif missing:
+            st.error(f"Missing input columns: {missing}")
         else:
             if st.button("🔮 Generate Target Predictions", type="primary"):
                 pred_df[date_c] = pd.to_datetime(pred_df[date_c], errors='coerce')
-                pred_df = pred_df.dropna(subset=[date_c]).sort_values(date_c).reset_index(drop=True)
+                pred_df = pred_df.sort_values(date_c).reset_index(drop=True)
                 
                 if not st.session_state['is_sequence_model']:
-                    # Recreate tabular features
                     pred_feat = create_features(pred_df, date_c, in_cols)
-                    pred_clean = pred_feat.dropna(subset=[f'{c}_lag3' for c in in_cols] + [f'{c}_sum7' for c in in_cols]).reset_index(drop=True)
                     
-                    X_new = pred_clean.drop(columns=[date_c, target_name], errors='ignore')
+                    X_cols = st.session_state['feature_cols']
+                    X_new = pred_feat[X_cols]
                     
                     if model_type in ["SVR", "KNN", "ANN (MLP)"]:
                         X_new_sc = st.session_state['scaler_x'].transform(X_new)
@@ -468,49 +473,43 @@ else:
                     else:
                         preds = model.predict(X_new)
                         
-                    result_df = pd.DataFrame({
-                        date_c: pred_clean[date_c],
+                    res = pd.DataFrame({
+                        date_c: pred_df[date_c],
                         f"Predicted_{target_name}": preds
                     })
-                
                 else:
-                    # Recreate sequence features
                     win = st.session_state['window_size']
-                    pred_seq_df = pred_df.copy()
-                    pred_seq_df['day_sin'] = np.sin(2 * np.pi * pred_seq_df[date_c].dt.dayofyear / 365.25)
-                    pred_seq_df['day_cos'] = np.cos(2 * np.pi * pred_seq_df[date_c].dt.dayofyear / 365.25)
+                    seq_features = st.session_state['raw_features']
+                    pred_df['day_sin'] = np.sin(2 * np.pi * pred_df[date_c].dt.dayofyear / 365.25)
+                    pred_df['day_cos'] = np.cos(2 * np.pi * pred_df[date_c].dt.dayofyear / 365.25)
                     
-                    raw_features = list(in_cols) + ['day_sin', 'day_cos']
-                    X_new_scaled = st.session_state['scaler_x'].transform(pred_seq_df[raw_features])
-                    
-                    X_seq_new = create_pred_sequences(X_new_scaled, win)
+                    X_sc = st.session_state['scaler_x'].transform(pred_df[seq_features])
+                    X_seq_new = create_pred_sequences(X_sc, win)
                     
                     if len(X_seq_new) == 0:
                         st.error(f"Uploaded file has fewer rows than the required window size ({win} days).")
-                        preds = None
+                        res = None
                     else:
                         if model_type == "HydroAttentionNet":
                             model.eval()
                             with torch.no_grad():
-                                preds_scaled = model(torch.FloatTensor(X_seq_new)).numpy()
-                            preds = st.session_state['scaler_y'].inverse_transform(preds_scaled).flatten()
+                                sc_preds = model(torch.FloatTensor(X_seq_new)).numpy()
+                            preds = st.session_state['scaler_y'].inverse_transform(sc_preds).flatten()
                         else:
-                            preds_scaled = model.predict(X_seq_new, verbose=0)
-                            preds = st.session_state['scaler_y'].inverse_transform(preds_scaled).flatten()
+                            sc_preds = model.predict(X_seq_new, verbose=0)
+                            preds = st.session_state['scaler_y'].inverse_transform(sc_preds).flatten()
                             
-                        pred_dates = pred_seq_df[date_c].iloc[win:].reset_index(drop=True)
-                        result_df = pd.DataFrame({
-                            date_c: pred_dates,
+                        res = pd.DataFrame({
+                            date_c: pred_df[date_c].iloc[win:].reset_index(drop=True),
                             f"Predicted_{target_name}": preds
                         })
-
-                if 'result_df' in locals():
-                    st.success("Target Generated Successfully!")
-                    st.dataframe(result_df.head(15), use_container_width=True)
                     
-                    csv = result_df.to_csv(index=False).encode('utf-8')
+                if 'res' in locals() and res is not None:
+                    st.success("Predictions generated!")
+                    st.dataframe(res.head(15), use_container_width=True)
+                    csv = res.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label="📥 Download Predicted Results (CSV)",
+                        label="📥 Download Predictions CSV",
                         data=csv,
                         file_name=f"predicted_{target_name}.csv",
                         mime="text/csv"
