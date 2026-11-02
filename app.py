@@ -1,3 +1,4 @@
+import io
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -29,8 +30,8 @@ st.set_page_config(page_title="Universal Hydrological Predictor", layout="wide")
 # =========================
 # HELPER FUNCTIONS & METRICS
 # =========================
-def calc_nse(obs, sim):
-    return 1 - (np.sum((obs - sim) ** 2) / np.sum((obs - np.mean(obs)) ** 2))
+def calc_pbias(obs, sim):
+    return 100.0 * np.sum(sim - obs) / np.sum(obs)
 
 def create_features(df, date_col, input_cols):
     df = df.copy()
@@ -60,6 +61,13 @@ def create_pred_sequences(x, window=7):
     for i in range(len(x) - window):
         X_seq.append(x[i : i + window])
     return np.array(X_seq)
+
+def to_excel_bytes(dataframe):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        dataframe.to_excel(writer, index=False)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 # =========================
 # PYTORCH HYDROATTENTIONNET
@@ -237,6 +245,7 @@ if train_file:
                     split = int(len(df_clean) * 0.8)
                     X_train, X_test = X.iloc[:split], X.iloc[split:]
                     y_train, y_test = y[:split], y[split:]
+                    train_dates = df_clean[date_col].iloc[:split]
                     eval_dates = df_clean[date_col].iloc[split:]
 
                     scaler_x = StandardScaler()
@@ -253,37 +262,44 @@ if train_file:
                             random_state=42
                         )
                         model.fit(X_train, y_train)
+                        y_train_pred = model.predict(X_train)
                         y_pred = model.predict(X_test)
 
                     elif model_type == "Random Forest":
                         model = RandomForestRegressor(n_estimators=rf_trees, max_depth=rf_depth, random_state=42)
                         model.fit(X_train, y_train)
+                        y_train_pred = model.predict(X_train)
                         y_pred = model.predict(X_test)
 
                     elif model_type == "XGBoost":
                         model = xgb.XGBRegressor(n_estimators=gb_trees, learning_rate=gb_lr, max_depth=gb_depth, random_state=42)
                         model.fit(X_train, y_train)
+                        y_train_pred = model.predict(X_train)
                         y_pred = model.predict(X_test)
 
                     elif model_type == "LightGBM":
                         model = lgb.LGBMRegressor(n_estimators=gb_trees, learning_rate=gb_lr, max_depth=gb_depth, random_state=42)
                         model.fit(X_train, y_train)
+                        y_train_pred = model.predict(X_train)
                         y_pred = model.predict(X_test)
 
                     elif model_type == "SVR":
                         model = SVR(kernel=svr_kernel, C=svr_c)
                         model.fit(X_train_scaled, y_train)
+                        y_train_pred = model.predict(X_train_scaled)
                         y_pred = model.predict(X_test_scaled)
 
                     elif model_type == "KNN":
                         model = KNeighborsRegressor(n_neighbors=knn_n)
                         model.fit(X_train_scaled, y_train)
+                        y_train_pred = model.predict(X_train_scaled)
                         y_pred = model.predict(X_test_scaled)
 
                     elif model_type == "ANN (MLP)":
                         layers = tuple(int(x.strip()) for x in mlp_layers.split(','))
                         model = MLPRegressor(hidden_layer_sizes=layers, max_iter=mlp_iter, random_state=42)
                         model.fit(X_train_scaled, y_train)
+                        y_train_pred = model.predict(X_train_scaled)
                         y_pred = model.predict(X_test_scaled)
 
                     st.session_state['trained_model'] = model
@@ -305,13 +321,15 @@ if train_file:
 
                     split_seq = int(len(X_seq) * 0.8)
                     X_train, X_test = X_seq[:split_seq], X_seq[split_seq:]
-                    y_train, y_test_sc = y_seq[:split_seq], y_seq[split_seq:]
-                    eval_dates = df_clean[date_col].iloc[win + split_seq:].reset_index(drop=True)
+                    y_train_sc, y_test_sc = y_seq[:split_seq], y_seq[split_seq:]
+                    
+                    train_dates = df_clean[date_col].iloc[win : win + split_seq].reset_index(drop=True)
+                    eval_dates = df_clean[date_col].iloc[win + split_seq :].reset_index(drop=True)
 
                     if model_type == "HydroAttentionNet":
                         X_train_torch = torch.FloatTensor(X_train)
                         X_test_torch = torch.FloatTensor(X_test)
-                        y_train_torch = torch.FloatTensor(y_train)
+                        y_train_torch = torch.FloatTensor(y_train_sc)
 
                         model = HydroAttentionNet(input_size=len(raw_features), hidden_size=int(hydro_hidden))
                         optimizer = torch.optim.Adam(model.parameters(), lr=hydro_lr)
@@ -326,8 +344,12 @@ if train_file:
 
                         model.eval()
                         with torch.no_grad():
-                            pred_scaled = model(X_test_torch).numpy()
-                        y_pred = scaler_y.inverse_transform(pred_scaled).flatten()
+                            train_pred_sc = model(X_train_torch).numpy()
+                            test_pred_sc = model(X_test_torch).numpy()
+                            
+                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
+                        y_train = scaler_y.inverse_transform(y_train_sc).flatten()
+                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
                         y_test = scaler_y.inverse_transform(y_test_sc).flatten()
 
                     elif model_type == "CNN-LSTM":
@@ -344,15 +366,19 @@ if train_file:
                         ])
                         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=cnn_lr), loss='mse')
                         model.fit(
-                            X_train, y_train,
+                            X_train, y_train_sc,
                             epochs=int(cnn_epochs),
                             batch_size=int(cnn_batch),
                             validation_data=(X_test, y_test_sc),
                             callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)],
                             verbose=0
                         )
-                        pred_scaled = model.predict(X_test, verbose=0)
-                        y_pred = scaler_y.inverse_transform(pred_scaled).flatten()
+                        train_pred_sc = model.predict(X_train, verbose=0)
+                        test_pred_sc = model.predict(X_test, verbose=0)
+                        
+                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
+                        y_train = scaler_y.inverse_transform(y_train_sc).flatten()
+                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
                         y_test = scaler_y.inverse_transform(y_test_sc).flatten()
 
                     elif model_type == "LSTM":
@@ -363,9 +389,14 @@ if train_file:
                             Dense(1)
                         ])
                         model.compile(optimizer=tf.keras.optimizers.Adam(0.001), loss='mse')
-                        model.fit(X_train, y_train, epochs=int(rec_epochs), batch_size=int(rec_batch), verbose=0)
-                        pred_scaled = model.predict(X_test, verbose=0)
-                        y_pred = scaler_y.inverse_transform(pred_scaled).flatten()
+                        model.fit(X_train, y_train_sc, epochs=int(rec_epochs), batch_size=int(rec_batch), verbose=0)
+                        
+                        train_pred_sc = model.predict(X_train, verbose=0)
+                        test_pred_sc = model.predict(X_test, verbose=0)
+                        
+                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
+                        y_train = scaler_y.inverse_transform(y_train_sc).flatten()
+                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
                         y_test = scaler_y.inverse_transform(y_test_sc).flatten()
 
                     elif model_type == "GRU":
@@ -376,9 +407,14 @@ if train_file:
                             Dense(1)
                         ])
                         model.compile(optimizer=tf.keras.optimizers.Adam(0.001), loss='mse')
-                        model.fit(X_train, y_train, epochs=int(rec_epochs), batch_size=int(rec_batch), verbose=0)
-                        pred_scaled = model.predict(X_test, verbose=0)
-                        y_pred = scaler_y.inverse_transform(pred_scaled).flatten()
+                        model.fit(X_train, y_train_sc, epochs=int(rec_epochs), batch_size=int(rec_batch), verbose=0)
+                        
+                        train_pred_sc = model.predict(X_train, verbose=0)
+                        test_pred_sc = model.predict(X_test, verbose=0)
+                        
+                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
+                        y_train = scaler_y.inverse_transform(y_train_sc).flatten()
+                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
                         y_test = scaler_y.inverse_transform(y_test_sc).flatten()
 
                     elif model_type == "Transformer":
@@ -390,9 +426,14 @@ if train_file:
                         out = Dense(1)(dense)
                         model = models.Model(inp, out)
                         model.compile(optimizer='adam', loss='mse')
-                        model.fit(X_train, y_train, epochs=int(trans_epochs), batch_size=int(trans_batch), verbose=0)
-                        pred_scaled = model.predict(X_test, verbose=0)
-                        y_pred = scaler_y.inverse_transform(pred_scaled).flatten()
+                        model.fit(X_train, y_train_sc, epochs=int(trans_epochs), batch_size=int(trans_batch), verbose=0)
+                        
+                        train_pred_sc = model.predict(X_train, verbose=0)
+                        test_pred_sc = model.predict(X_test, verbose=0)
+                        
+                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
+                        y_train = scaler_y.inverse_transform(y_train_sc).flatten()
+                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
                         y_test = scaler_y.inverse_transform(y_test_sc).flatten()
 
                     st.session_state['trained_model'] = model
@@ -407,19 +448,20 @@ if train_file:
                 st.session_state['input_cols'] = input_cols
                 st.session_state['is_sequence_model'] = is_sequence_model
 
-                # Metrics calculation on the 20% validation split
+                # Testing Metrics calculation (r2, rmse, MAE, Pbias)
                 r2 = r2_score(y_test, y_pred)
-                nse = calc_nse(y_test, y_pred)
                 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
                 mae = mean_absolute_error(y_test, y_pred)
+                pbias = calc_pbias(y_test, y_pred)
 
                 st.success(f"Training Complete! Selected Model: {model_type}")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("R² Score", round(r2, 4))
-                m2.metric("NSE", round(nse, 4))
-                m3.metric("RMSE", round(rmse, 2))
-                m4.metric("MAE", round(mae, 2))
+                m2.metric("RMSE", round(rmse, 2))
+                m3.metric("MAE", round(mae, 2))
+                m4.metric("PBIAS (%)", f"{round(pbias, 2)}%")
 
+                # Hydrograph plot
                 fig, ax = plt.subplots(figsize=(14, 4))
                 fig.patch.set_facecolor('#0e1117')
                 ax.set_facecolor('#0e1117')
@@ -429,6 +471,44 @@ if train_file:
                 ax.grid(True, alpha=0.2)
                 ax.legend(facecolor='#0e1117', labelcolor='white')
                 st.pyplot(fig)
+
+                # =========================
+                # EXCEL EXPORT (TRAIN & TEST)
+                # =========================
+                clean_name = model_type.replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_")
+                pred_col_name = f"{clean_name}_predicted"
+
+                df_train_export = pd.DataFrame({
+                    'Date': pd.Series(train_dates).values,
+                    'Observed': np.asarray(y_train).flatten(),
+                    pred_col_name: np.asarray(y_train_pred).flatten()
+                })
+
+                df_test_export = pd.DataFrame({
+                    'Date': pd.Series(eval_dates).values,
+                    'Observed': np.asarray(y_test).flatten(),
+                    pred_col_name: np.asarray(y_pred).flatten()
+                })
+
+                st.write("---")
+                st.write("### 📥 Download Prediction Files (.xlsx)")
+                d_c1, d_c2 = st.columns(2)
+
+                train_excel_data = to_excel_bytes(df_train_export)
+                d_c1.download_button(
+                    label="📊 Download Training Predictions (Excel)",
+                    data=train_excel_data,
+                    file_name=f"{clean_name}_training_predictions.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+                test_excel_data = to_excel_bytes(df_test_export)
+                d_c2.download_button(
+                    label="📈 Download Testing Predictions (Excel)",
+                    data=test_excel_data,
+                    file_name=f"{clean_name}_testing_predictions.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
 # =========================
 # PHASE 2: GENERATE TARGET
@@ -507,10 +587,10 @@ else:
                 if 'res' in locals() and res is not None:
                     st.success("Predictions generated!")
                     st.dataframe(res.head(15), use_container_width=True)
-                    csv = res.to_csv(index=False).encode('utf-8')
+                    excel_pred_data = to_excel_bytes(res)
                     st.download_button(
-                        label="📥 Download Predictions CSV",
-                        data=csv,
-                        file_name=f"predicted_{target_name}.csv",
-                        mime="text/csv"
+                        label="📥 Download Predictions (Excel)",
+                        data=excel_pred_data,
+                        file_name=f"predicted_{target_name}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
