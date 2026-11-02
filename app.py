@@ -33,7 +33,15 @@ st.set_page_config(page_title="Universal Hydrological Predictor", layout="wide")
 def calc_pbias(obs, sim):
     return 100.0 * np.sum(sim - obs) / np.sum(obs)
 
-def create_features(df, date_col, input_cols):
+def parse_target_inputs(val_str):
+    if not val_str or str(val_str).strip().lower() == 'none':
+        return []
+    try:
+        return [int(x.strip()) for x in str(val_str).split(',') if x.strip().isdigit()]
+    except:
+        return []
+
+def create_features(df, date_col, input_cols, target_col=None, t_lags=[], t_rolls=[]):
     df = df.copy()
     
     # 1. Cyclical seasonal encoding on Date
@@ -46,7 +54,14 @@ def create_features(df, date_col, input_cols):
             df[f'{col}_lag{lag}'] = df[col].shift(lag)
         df[f'{col}_sum3'] = df[col].rolling(3).sum()
         df[f'{col}_sum7'] = df[col].rolling(7).sum()
-    
+        
+    # 3. Custom Lags and Rolling sums for TARGET variable
+    if target_col and target_col in df.columns:
+        for lag in t_lags:
+            df[f'{target_col}_lag{lag}'] = df[target_col].shift(lag)
+        for r in t_rolls:
+            df[f'{target_col}_sum{r}'] = df[target_col].rolling(r).sum()
+            
     return df
 
 def create_sequences(x, y, window=7):
@@ -189,7 +204,7 @@ if train_file:
                 mlp_iter = st.number_input("Max Iterations", value=500, step=50)
 
     st.write("---")
-    st.write("### 📌 Column Mapping")
+    st.write("### 📌 Column Mapping & Feature Engineering")
     c3, c4, c5 = st.columns(3)
     
     # 3. Date Dropdown
@@ -208,6 +223,10 @@ if train_file:
         default=default_inputs
     )
 
+    c6, c7 = st.columns(2)
+    t_lags_input = c6.text_input("6. Target Lags (comma-separated, e.g. 1,2,5,7 or None)", "None")
+    t_rolls_input = c7.text_input("7. Target Rolling Sums (comma-separated, e.g. 3,7 or None)", "None")
+
     # =========================
     # TRAINING WORKFLOW
     # =========================
@@ -216,14 +235,18 @@ if train_file:
             st.error("Please select at least one Input Feature.")
         else:
             with st.spinner(f"Processing features and training {model_type}..."):
+                
+                t_lags = parse_target_inputs(t_lags_input)
+                t_rolls = parse_target_inputs(t_rolls_input)
+                
                 # Clean dataframe: sort chronologically and drop missing targets first
                 df = df_raw.copy()
                 df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
                 df = df.sort_values(date_col)
                 df = df.dropna(subset=[target_col]).reset_index(drop=True)
                 
-                # Create lag and rolling sum features for ALL selected input features
-                df_feat = create_features(df, date_col, input_cols)
+                # Create lag and rolling sum features for inputs AND target
+                df_feat = create_features(df, date_col, input_cols, target_col, t_lags, t_rolls)
                 df_clean = df_feat.dropna().reset_index(drop=True)
 
                 # Collect all generated feature names
@@ -234,6 +257,11 @@ if train_file:
                         engineered_cols.append(f'{col}_lag{lag}')
                     engineered_cols.append(f'{col}_sum3')
                     engineered_cols.append(f'{col}_sum7')
+                
+                for lag in t_lags:
+                    engineered_cols.append(f'{target_col}_lag{lag}')
+                for r in t_rolls:
+                    engineered_cols.append(f'{target_col}_sum{r}')
 
                 is_sequence_model = model_type in ["HydroAttentionNet", "CNN-LSTM", "LSTM", "GRU", "Transformer"]
 
@@ -312,7 +340,7 @@ if train_file:
                     scaler_x = StandardScaler()
                     scaler_y = StandardScaler()
 
-                    raw_features = list(input_cols) + ['day_sin', 'day_cos']
+                    raw_features = engineered_cols # Use all generated tabular features inside the window
                     X_scaled = scaler_x.fit_transform(df_clean[raw_features])
                     y_scaled = scaler_y.fit_transform(df_clean[[target_col]])
 
@@ -447,8 +475,12 @@ if train_file:
                 st.session_state['target_col'] = target_col
                 st.session_state['input_cols'] = input_cols
                 st.session_state['is_sequence_model'] = is_sequence_model
+                
+                # Save target configurations for Phase 2
+                st.session_state['t_lags'] = t_lags
+                st.session_state['t_rolls'] = t_rolls
 
-                # Testing Metrics calculation (r2, rmse, MAE, Pbias)
+                # Testing Metrics calculation
                 r2 = r2_score(y_test, y_pred)
                 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
                 mae = mean_absolute_error(y_test, y_pred)
@@ -530,21 +562,27 @@ else:
         model = st.session_state['trained_model']
         model_type = st.session_state['model_type']
         
+        t_lags = st.session_state.get('t_lags', [])
+        t_rolls = st.session_state.get('t_rolls', [])
+        
         missing = [c for c in in_cols if c not in pred_df.columns]
         
         if date_c not in pred_df.columns:
             st.error(f"Missing date column '{date_c}' in file.")
         elif missing:
             st.error(f"Missing input columns: {missing}")
+        elif (t_lags or t_rolls) and target_name not in pred_df.columns:
+            st.error(f"Because you trained with Target Lags/Rolling, your uploaded prediction file MUST contain the '{target_name}' column to generate history features.")
         else:
             if st.button("🔮 Generate Target Predictions", type="primary"):
                 pred_df[date_c] = pd.to_datetime(pred_df[date_c], errors='coerce')
                 pred_df = pred_df.sort_values(date_c).reset_index(drop=True)
                 
                 if not st.session_state['is_sequence_model']:
-                    pred_feat = create_features(pred_df, date_c, in_cols)
+                    pred_feat = create_features(pred_df, date_c, in_cols, target_name, t_lags, t_rolls)
                     
                     X_cols = st.session_state['feature_cols']
+                    pred_feat = pred_feat.dropna(subset=X_cols).reset_index(drop=True)
                     X_new = pred_feat[X_cols]
                     
                     if model_type in ["SVR", "KNN", "ANN (MLP)"]:
@@ -554,20 +592,21 @@ else:
                         preds = model.predict(X_new)
                         
                     res = pd.DataFrame({
-                        date_c: pred_df[date_c],
+                        date_c: pred_feat[date_c],
                         f"Predicted_{target_name}": preds
                     })
                 else:
                     win = st.session_state['window_size']
                     seq_features = st.session_state['raw_features']
-                    pred_df['day_sin'] = np.sin(2 * np.pi * pred_df[date_c].dt.dayofyear / 365.25)
-                    pred_df['day_cos'] = np.cos(2 * np.pi * pred_df[date_c].dt.dayofyear / 365.25)
                     
-                    X_sc = st.session_state['scaler_x'].transform(pred_df[seq_features])
+                    pred_feat = create_features(pred_df, date_c, in_cols, target_name, t_lags, t_rolls)
+                    pred_feat = pred_feat.dropna(subset=seq_features).reset_index(drop=True)
+                    
+                    X_sc = st.session_state['scaler_x'].transform(pred_feat[seq_features])
                     X_seq_new = create_pred_sequences(X_sc, win)
                     
                     if len(X_seq_new) == 0:
-                        st.error(f"Uploaded file has fewer rows than the required window size ({win} days).")
+                        st.error(f"Uploaded file has fewer valid rows than the required window size ({win} days) after accounting for lags.")
                         res = None
                     else:
                         if model_type == "HydroAttentionNet":
@@ -580,7 +619,7 @@ else:
                             preds = st.session_state['scaler_y'].inverse_transform(sc_preds).flatten()
                             
                         res = pd.DataFrame({
-                            date_c: pred_df[date_c].iloc[win:].reset_index(drop=True),
+                            date_c: pred_feat[date_c].iloc[win:].reset_index(drop=True),
                             f"Predicted_{target_name}": preds
                         })
                     
