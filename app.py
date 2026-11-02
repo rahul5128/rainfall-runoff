@@ -33,36 +33,39 @@ st.set_page_config(page_title="Universal Hydrological Predictor", layout="wide")
 def calc_pbias(obs, sim):
     return 100.0 * np.sum(sim - obs) / np.sum(obs)
 
-def parse_target_inputs(val_str):
-    if not val_str or str(val_str).strip().lower() == 'none':
-        return []
-    try:
-        return [int(x.strip()) for x in str(val_str).split(',') if x.strip().isdigit()]
-    except:
-        return []
-
-def create_features(df, date_col, input_cols, target_col=None, t_lags=[], t_rolls=[]):
+def create_features(df, date_col, use_date_encoding, feature_configs):
     df = df.copy()
+    engineered_cols = []
     
-    # 1. Cyclical seasonal encoding on Date
-    df['day_sin'] = np.sin(2 * np.pi * df[date_col].dt.dayofyear / 365.25)
-    df['day_cos'] = np.cos(2 * np.pi * df[date_col].dt.dayofyear / 365.25)
+    # 1. Optional Cyclical seasonal encoding on Date
+    if use_date_encoding and date_col in df.columns:
+        df['day_sin'] = np.sin(2 * np.pi * df[date_col].dt.dayofyear / 365.25)
+        df['day_cos'] = np.cos(2 * np.pi * df[date_col].dt.dayofyear / 365.25)
+        engineered_cols.extend(['day_sin', 'day_cos'])
     
-    # 2. Lag (1-3) and Rolling sums (3, 7) for ALL selected input features
-    for col in input_cols:
-        for lag in range(1, 4):
-            df[f'{col}_lag{lag}'] = df[col].shift(lag)
-        df[f'{col}_sum3'] = df[col].rolling(3).sum()
-        df[f'{col}_sum7'] = df[col].rolling(7).sum()
+    # 2. Apply Custom Granular Feature Configurations
+    for i, cfg in enumerate(feature_configs):
+        col = cfg['col']
+        trans = cfg['trans']
+        val = cfg['val']
         
-    # 3. Custom Lags and Rolling sums for TARGET variable
-    if target_col and target_col in df.columns:
-        for lag in t_lags:
-            df[f'{target_col}_lag{lag}'] = df[target_col].shift(lag)
-        for r in t_rolls:
-            df[f'{target_col}_sum{r}'] = df[target_col].rolling(r).sum()
+        if col not in df.columns:
+            continue
             
-    return df
+        if trans == "Raw":
+            new_col = f"{col}_raw_{i}"
+            df[new_col] = df[col]
+            engineered_cols.append(new_col)
+        elif trans == "Lag":
+            new_col = f"{col}_lag{val}_{i}"
+            df[new_col] = df[col].shift(val)
+            engineered_cols.append(new_col)
+        elif trans == "Rolling Sum":
+            new_col = f"{col}_sum{val}_{i}"
+            df[new_col] = df[col].rolling(val).sum()
+            engineered_cols.append(new_col)
+            
+    return df, engineered_cols
 
 def create_sequences(x, y, window=7):
     X_seq, y_seq = [], []
@@ -128,7 +131,7 @@ def physics_informed_loss(output, target):
 col_title, col_manual = st.columns([5, 1])
 
 with col_title:
-    st.title("🌊 Universal Hydrological Predictor")
+    st.title("🌊 Universal Model Predictor")
     st.caption("End-to-end framework for hydrological sequence & tabular modeling")
 
 with col_manual:
@@ -140,16 +143,16 @@ with col_manual:
         <b>1. Training & Validation</b>
         <ul>
             <li><b>Upload Data:</b> Provide your historical dataset (CSV or Excel).</li>
-            <li><b>Select Model:</b> Choose from tree-based algorithms, distance models, or deep learning architectures.</li>
-            <li><b>Hyperparameters:</b> Expand the settings menu to customize learning rates, epochs, or layers.</li>
-            <li><b>Column Mapping:</b> Assign your Date, Target, and Input Features.</li>
-            <li><b>Target Engineering:</b> Optionally specify target lags (e.g., <code>1,2,3</code>) or rolling sums (e.g., <code>3,7</code>). Type <code>None</code> to disable.</li>
-            <li>Click <b>Train & Evaluate</b> to generate the hydrograph and download testing/training files.</li>
+            <li><b>Select Model & Hyperparameters:</b> Choose your architecture and tune the settings.</li>
+            <li><b>Date Encoding:</b> Toggle the checkbox to include or exclude cyclical date features (day_sin, day_cos).</li>
+            <li><b>Granular Input Features:</b> Click <b>➕ Add Feature</b> to build your feature set one by one. Select the base column, then choose if it should be used as Raw, a Lag (e.g., Lag 1), or a Rolling Sum (e.g., Rolling 3).</li>
+            <li><b>Target Lags:</b> You can select your Target column in the feature list and apply Lags/Rolling Sums to use historical target values as predictors!</li>
+            <li>Click <b>Train & Evaluate</b>.</li>
         </ul>
         <b>2. Generate Target (Inference)</b>
         <ul>
-            <li>After training, scroll to the bottom section.</li>
-            <li>Upload a new dataset containing the exact same input features.</li>
+            <li>Upload a new <b>raw</b> dataset. You do NOT need to calculate lags or rolling sums yourself.</li>
+            <li>As long as your uploaded file contains the original base columns, the app will automatically engineer all the specific lags and rolling windows you configured during training.</li>
             <li>Click <b>Generate Target Predictions</b> to download your future forecast.</li>
         </ul>
         </div>
@@ -231,40 +234,58 @@ if train_file:
                 mlp_iter = st.number_input("Max Iterations", value=500, step=50)
 
     st.write("---")
-    st.write("### 📌 Column Mapping & Feature Engineering")
-    c3, c4, c5 = st.columns(3)
+    st.write("### 📌 Column Mapping & Granular Feature Builder")
+    c3, c4 = st.columns(2)
     
-    # 3. Date Dropdown
-    date_col = c3.selectbox("3. Select Date Column", cols, index=0)
+    # Date & Target Base Selection
+    date_col = c3.selectbox("Date Column", cols, index=0)
+    use_date = c3.checkbox("Include Date Encoding (day_sin, day_cos)", value=True)
     
-    # 5. Target Dropdown
     target_matches = [i for i, c in enumerate(cols) if 'discharge' in c.lower() or 'target' in c.lower()]
     target_default = target_matches[0] if target_matches else len(cols) - 1
-    target_col = c5.selectbox("5. Select Target Column", cols, index=target_default)
+    target_col = c4.selectbox("Target Column", cols, index=target_default)
 
-    # 4. Input Features Dropdown
-    default_inputs = [c for c in cols if c not in [date_col, target_col, 'Water Level(m)']]
-    input_cols = c4.multiselect(
-        "4. Select Input Features",
-        [c for c in cols if c not in [date_col, target_col]],
-        default=default_inputs
-    )
+    st.write("**Construct Input Features**")
+    
+    if 'num_features' not in st.session_state:
+        st.session_state.num_features = 1
+        
+    def add_feature():
+        st.session_state.num_features += 1
+    def remove_feature():
+        if st.session_state.num_features > 1:
+            st.session_state.num_features -= 1
 
-    c6, c7 = st.columns(2)
-    t_lags_input = c6.text_input("6. Target Lags (comma-separated, e.g. 1,2,5,7 or None)", "None")
-    t_rolls_input = c7.text_input("7. Target Rolling Sums (comma-separated, e.g. 3,7 or None)", "None")
+    feature_configs = []
+    
+    for i in range(st.session_state.num_features):
+        fc1, fc2, fc3 = st.columns([2, 2, 1])
+        col_sel = fc1.selectbox(f"Feature {i+1} Base Column", cols, key=f"fcol_{i}")
+        trans_sel = fc2.selectbox(f"Transform {i+1}", ["Raw", "Lag", "Rolling Sum"], key=f"ftrans_{i}", label_visibility="collapsed")
+        
+        val_sel = 0
+        if trans_sel != "Raw":
+            val_sel = fc3.number_input(f"Value {i+1}", min_value=1, value=1, step=1, key=f"fval_{i}", label_visibility="collapsed")
+            
+        feature_configs.append({
+            'col': col_sel,
+            'trans': trans_sel,
+            'val': val_sel
+        })
+
+    bc1, bc2 = st.columns([1, 8])
+    bc1.button("➕ Add Feature", on_click=add_feature)
+    bc2.button("➖ Remove Last", on_click=remove_feature)
 
     # =========================
     # TRAINING WORKFLOW
     # =========================
+    st.write("<br>", unsafe_allow_html=True)
     if st.button("🚀 Train & Evaluate Model", type="primary"):
-        if not input_cols:
-            st.error("Please select at least one Input Feature.")
+        if len(feature_configs) == 0:
+            st.error("Please add at least one Input Feature.")
         else:
-            with st.spinner(f"Processing features and training {model_type}..."):
-                
-                t_lags = parse_target_inputs(t_lags_input)
-                t_rolls = parse_target_inputs(t_rolls_input)
+            with st.spinner(f"Processing granular features and training {model_type}..."):
                 
                 # Clean dataframe: sort chronologically and drop missing targets first
                 df = df_raw.copy()
@@ -272,28 +293,14 @@ if train_file:
                 df = df.sort_values(date_col)
                 df = df.dropna(subset=[target_col]).reset_index(drop=True)
                 
-                # Create lag and rolling sum features for inputs AND target
-                df_feat = create_features(df, date_col, input_cols, target_col, t_lags, t_rolls)
+                # Dynamically build features based on user configuration
+                df_feat, engineered_cols = create_features(df, date_col, use_date, feature_configs)
                 df_clean = df_feat.dropna().reset_index(drop=True)
-
-                # Collect all generated feature names
-                engineered_cols = ['day_sin', 'day_cos']
-                for col in input_cols:
-                    engineered_cols.append(col)
-                    for lag in range(1, 4):
-                        engineered_cols.append(f'{col}_lag{lag}')
-                    engineered_cols.append(f'{col}_sum3')
-                    engineered_cols.append(f'{col}_sum7')
-                
-                for lag in t_lags:
-                    engineered_cols.append(f'{target_col}_lag{lag}')
-                for r in t_rolls:
-                    engineered_cols.append(f'{target_col}_sum{r}')
 
                 is_sequence_model = model_type in ["HydroAttentionNet", "CNN-LSTM", "LSTM", "GRU", "Transformer"]
 
                 if not is_sequence_model:
-                    # Tabular Pipeline (HistGradientBoosting, RF, XGBoost, LightGBM, SVR, KNN, ANN)
+                    # Tabular Pipeline
                     X = df_clean[engineered_cols]
                     y = df_clean[target_col].values
 
@@ -309,12 +316,8 @@ if train_file:
 
                     if model_type == "HistGradientBoosting":
                         model = HistGradientBoostingRegressor(
-                            max_iter=hgb_iter,
-                            learning_rate=hgb_lr,
-                            max_leaf_nodes=hgb_leaves,
-                            min_samples_leaf=hgb_min_leaf,
-                            l2_regularization=hgb_l2,
-                            random_state=42
+                            max_iter=hgb_iter, learning_rate=hgb_lr, max_leaf_nodes=hgb_leaves,
+                            min_samples_leaf=hgb_min_leaf, l2_regularization=hgb_l2, random_state=42
                         )
                         model.fit(X_train, y_train)
                         y_train_pred = model.predict(X_train)
@@ -360,15 +363,13 @@ if train_file:
                     st.session_state['trained_model'] = model
                     st.session_state['scaler_x'] = scaler_x
                     st.session_state['scaler_y'] = None
-                    st.session_state['feature_cols'] = engineered_cols
 
                 else:
-                    # Deep Learning Sequence Pipeline
+                    # Sequence Pipeline
                     scaler_x = StandardScaler()
                     scaler_y = StandardScaler()
 
-                    raw_features = engineered_cols # Use all generated tabular features inside the window
-                    X_scaled = scaler_x.fit_transform(df_clean[raw_features])
+                    X_scaled = scaler_x.fit_transform(df_clean[engineered_cols])
                     y_scaled = scaler_y.fit_transform(df_clean[[target_col]])
 
                     win = int(window_size)
@@ -382,11 +383,10 @@ if train_file:
                     eval_dates = df_clean[date_col].iloc[win + split_seq :].reset_index(drop=True)
 
                     if model_type == "HydroAttentionNet":
-                        X_train_torch = torch.FloatTensor(X_train)
-                        X_test_torch = torch.FloatTensor(X_test)
+                        X_train_torch, X_test_torch = torch.FloatTensor(X_train), torch.FloatTensor(X_test)
                         y_train_torch = torch.FloatTensor(y_train_sc)
 
-                        model = HydroAttentionNet(input_size=len(raw_features), hidden_size=int(hydro_hidden))
+                        model = HydroAttentionNet(input_size=len(engineered_cols), hidden_size=int(hydro_hidden))
                         optimizer = torch.optim.Adam(model.parameters(), lr=hydro_lr)
 
                         for epoch in range(int(hydro_epochs)):
@@ -409,71 +409,35 @@ if train_file:
 
                     elif model_type == "CNN-LSTM":
                         model = models.Sequential([
-                            Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=(win, len(raw_features))),
-                            BatchNormalization(),
-                            MaxPooling1D(pool_size=2),
-                            LSTM(100, return_sequences=True),
-                            Dropout(0.2),
-                            LSTM(50),
-                            Dropout(0.2),
-                            Dense(32, activation='relu'),
-                            Dense(1)
+                            Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=(win, len(engineered_cols))),
+                            BatchNormalization(), MaxPooling1D(pool_size=2),
+                            LSTM(100, return_sequences=True), Dropout(0.2),
+                            LSTM(50), Dropout(0.2), Dense(32, activation='relu'), Dense(1)
                         ])
                         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=cnn_lr), loss='mse')
-                        model.fit(
-                            X_train, y_train_sc,
-                            epochs=int(cnn_epochs),
-                            batch_size=int(cnn_batch),
-                            validation_data=(X_test, y_test_sc),
-                            callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)],
-                            verbose=0
-                        )
-                        train_pred_sc = model.predict(X_train, verbose=0)
-                        test_pred_sc = model.predict(X_test, verbose=0)
+                        model.fit(X_train, y_train_sc, epochs=int(cnn_epochs), batch_size=int(cnn_batch), validation_data=(X_test, y_test_sc), callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)], verbose=0)
                         
-                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
+                        y_train_pred = scaler_y.inverse_transform(model.predict(X_train, verbose=0)).flatten()
                         y_train = scaler_y.inverse_transform(y_train_sc).flatten()
-                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
+                        y_pred = scaler_y.inverse_transform(model.predict(X_test, verbose=0)).flatten()
                         y_test = scaler_y.inverse_transform(y_test_sc).flatten()
 
-                    elif model_type == "LSTM":
+                    elif model_type in ["LSTM", "GRU"]:
+                        Layer = LSTM if model_type == "LSTM" else GRU
                         model = models.Sequential([
-                            LSTM(int(rec_units), input_shape=(win, len(raw_features))),
-                            Dropout(0.2),
-                            Dense(32, activation='relu'),
-                            Dense(1)
+                            Layer(int(rec_units), input_shape=(win, len(engineered_cols))),
+                            Dropout(0.2), Dense(32, activation='relu'), Dense(1)
                         ])
                         model.compile(optimizer=tf.keras.optimizers.Adam(0.001), loss='mse')
                         model.fit(X_train, y_train_sc, epochs=int(rec_epochs), batch_size=int(rec_batch), verbose=0)
                         
-                        train_pred_sc = model.predict(X_train, verbose=0)
-                        test_pred_sc = model.predict(X_test, verbose=0)
-                        
-                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
+                        y_train_pred = scaler_y.inverse_transform(model.predict(X_train, verbose=0)).flatten()
                         y_train = scaler_y.inverse_transform(y_train_sc).flatten()
-                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
-                        y_test = scaler_y.inverse_transform(y_test_sc).flatten()
-
-                    elif model_type == "GRU":
-                        model = models.Sequential([
-                            GRU(int(rec_units), input_shape=(win, len(raw_features))),
-                            Dropout(0.2),
-                            Dense(32, activation='relu'),
-                            Dense(1)
-                        ])
-                        model.compile(optimizer=tf.keras.optimizers.Adam(0.001), loss='mse')
-                        model.fit(X_train, y_train_sc, epochs=int(rec_epochs), batch_size=int(rec_batch), verbose=0)
-                        
-                        train_pred_sc = model.predict(X_train, verbose=0)
-                        test_pred_sc = model.predict(X_test, verbose=0)
-                        
-                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
-                        y_train = scaler_y.inverse_transform(y_train_sc).flatten()
-                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
+                        y_pred = scaler_y.inverse_transform(model.predict(X_test, verbose=0)).flatten()
                         y_test = scaler_y.inverse_transform(y_test_sc).flatten()
 
                     elif model_type == "Transformer":
-                        inp = Input(shape=(win, len(raw_features)))
+                        inp = Input(shape=(win, len(engineered_cols)))
                         attn = MultiHeadAttention(num_heads=int(trans_heads), key_dim=16)(inp, inp)
                         norm = LayerNormalization()(attn + inp)
                         pool = GlobalAveragePooling1D()(norm)
@@ -483,29 +447,24 @@ if train_file:
                         model.compile(optimizer='adam', loss='mse')
                         model.fit(X_train, y_train_sc, epochs=int(trans_epochs), batch_size=int(trans_batch), verbose=0)
                         
-                        train_pred_sc = model.predict(X_train, verbose=0)
-                        test_pred_sc = model.predict(X_test, verbose=0)
-                        
-                        y_train_pred = scaler_y.inverse_transform(train_pred_sc).flatten()
+                        y_train_pred = scaler_y.inverse_transform(model.predict(X_train, verbose=0)).flatten()
                         y_train = scaler_y.inverse_transform(y_train_sc).flatten()
-                        y_pred = scaler_y.inverse_transform(test_pred_sc).flatten()
+                        y_pred = scaler_y.inverse_transform(model.predict(X_test, verbose=0)).flatten()
                         y_test = scaler_y.inverse_transform(y_test_sc).flatten()
 
                     st.session_state['trained_model'] = model
                     st.session_state['scaler_x'] = scaler_x
                     st.session_state['scaler_y'] = scaler_y
                     st.session_state['window_size'] = win
-                    st.session_state['raw_features'] = raw_features
 
+                # Save global state for Inference
                 st.session_state['model_type'] = model_type
                 st.session_state['date_col'] = date_col
                 st.session_state['target_col'] = target_col
-                st.session_state['input_cols'] = input_cols
+                st.session_state['feature_configs'] = feature_configs
+                st.session_state['engineered_cols'] = engineered_cols
+                st.session_state['use_date_encoding'] = use_date
                 st.session_state['is_sequence_model'] = is_sequence_model
-                
-                # Save target configurations for Phase 2
-                st.session_state['t_lags'] = t_lags
-                st.session_state['t_rolls'] = t_rolls
 
                 # Testing Metrics calculation
                 r2 = r2_score(y_test, y_pred)
@@ -555,7 +514,7 @@ if train_file:
 
                 train_excel_data = to_excel_bytes(df_train_export)
                 d_c1.download_button(
-                    label="📊 Download Training Predictions (Excel)",
+                    label="📊 Download Training Predictions",
                     data=train_excel_data,
                     file_name=f"{clean_name}_training_predictions.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -563,7 +522,7 @@ if train_file:
 
                 test_excel_data = to_excel_bytes(df_test_export)
                 d_c2.download_button(
-                    label="📈 Download Testing Predictions (Excel)",
+                    label="📈 Download Testing Predictions",
                     data=test_excel_data,
                     file_name=f"{clean_name}_testing_predictions.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -579,38 +538,37 @@ if 'trained_model' not in st.session_state:
     st.info("Train a model above first to unlock target generation.")
 else:
     st.write(f"Active Model: **{st.session_state['model_type']}**")
-    new_file = st.file_uploader("Upload New Unseen Dataset (CSV/Excel)", type=['csv', 'xlsx'], key="pred")
+    new_file = st.file_uploader("Upload New Unseen Raw Dataset (CSV/Excel)", type=['csv', 'xlsx'], key="pred")
     
     if new_file:
         pred_df = pd.read_csv(new_file) if new_file.name.endswith('.csv') else pd.read_excel(new_file)
+        
         date_c = st.session_state['date_col']
-        in_cols = st.session_state['input_cols']
         target_name = st.session_state['target_col']
+        feature_configs = st.session_state['feature_configs']
+        use_date = st.session_state['use_date_encoding']
         model = st.session_state['trained_model']
         model_type = st.session_state['model_type']
         
-        t_lags = st.session_state.get('t_lags', [])
-        t_rolls = st.session_state.get('t_rolls', [])
-        
-        missing = [c for c in in_cols if c not in pred_df.columns]
+        # Check required base columns based on what the user built
+        req_base_cols = list(set([cfg['col'] for cfg in feature_configs]))
+        missing = [c for c in req_base_cols if c not in pred_df.columns]
         
         if date_c not in pred_df.columns:
             st.error(f"Missing date column '{date_c}' in file.")
         elif missing:
-            st.error(f"Missing input columns: {missing}")
-        elif (t_lags or t_rolls) and target_name not in pred_df.columns:
-            st.error(f"Because you trained with Target Lags/Rolling, your uploaded prediction file MUST contain the '{target_name}' column to generate history features.")
+            st.error(f"Missing base columns in file required to engineer your features: {missing}")
         else:
             if st.button("🔮 Generate Target Predictions", type="primary"):
                 pred_df[date_c] = pd.to_datetime(pred_df[date_c], errors='coerce')
                 pred_df = pred_df.sort_values(date_c).reset_index(drop=True)
                 
+                # Apply granular engineering seamlessly on raw input data
+                pred_feat, engineered_cols = create_features(pred_df, date_c, use_date, feature_configs)
+                pred_feat = pred_feat.dropna(subset=engineered_cols).reset_index(drop=True)
+                
                 if not st.session_state['is_sequence_model']:
-                    pred_feat = create_features(pred_df, date_c, in_cols, target_name, t_lags, t_rolls)
-                    
-                    X_cols = st.session_state['feature_cols']
-                    pred_feat = pred_feat.dropna(subset=X_cols).reset_index(drop=True)
-                    X_new = pred_feat[X_cols]
+                    X_new = pred_feat[engineered_cols]
                     
                     if model_type in ["SVR", "KNN", "ANN (MLP)"]:
                         X_new_sc = st.session_state['scaler_x'].transform(X_new)
@@ -624,16 +582,11 @@ else:
                     })
                 else:
                     win = st.session_state['window_size']
-                    seq_features = st.session_state['raw_features']
-                    
-                    pred_feat = create_features(pred_df, date_c, in_cols, target_name, t_lags, t_rolls)
-                    pred_feat = pred_feat.dropna(subset=seq_features).reset_index(drop=True)
-                    
-                    X_sc = st.session_state['scaler_x'].transform(pred_feat[seq_features])
+                    X_sc = st.session_state['scaler_x'].transform(pred_feat[engineered_cols])
                     X_seq_new = create_pred_sequences(X_sc, win)
                     
                     if len(X_seq_new) == 0:
-                        st.error(f"Uploaded file has fewer valid rows than the required window size ({win} days) after accounting for lags.")
+                        st.error(f"Uploaded file has fewer valid rows than the required window size ({win} days) after dropping history padding.")
                         res = None
                     else:
                         if model_type == "HydroAttentionNet":
