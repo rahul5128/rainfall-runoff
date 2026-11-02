@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-st.set_page_config(page_title="Universal Hydrological Predictor", layout="wide")
+st.set_page_config(page_title="Universal ML Predictor", layout="wide")
 
 # =========================
 # HELPER FUNCTIONS & METRICS
@@ -131,8 +131,8 @@ def physics_informed_loss(output, target):
 col_title, col_manual = st.columns([5, 1])
 
 with col_title:
-    st.title("🌊 Universal Model Predictor")
-    st.caption("End-to-end framework for hydrological sequence & tabular modeling")
+    st.title("🔮 Universal ML & Time-Series Predictor")
+    st.caption("End-to-end framework for sequence & tabular modeling")
 
 with col_manual:
     st.write("<br>", unsafe_allow_html=True)
