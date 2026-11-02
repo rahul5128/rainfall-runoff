@@ -4,6 +4,7 @@ numpy
 matplotlib
 scikit-learn
 openpyxl
+xgboost
 lightgbm
 tensorflow-cpu
-xgboost
+torch
