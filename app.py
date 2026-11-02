@@ -125,8 +125,35 @@ def physics_informed_loss(output, target):
 # =========================
 # APPLICATION INTERFACE
 # =========================
-st.title("🌊 Universal Hydrological & Time-Series Model Predictor")
-st.caption("End-to-end framework for hydrological sequence & tabular modeling")
+col_title, col_manual = st.columns([5, 1])
+
+with col_title:
+    st.title("🌊 Universal Hydrological Predictor")
+    st.caption("End-to-end framework for hydrological sequence & tabular modeling")
+
+with col_manual:
+    st.write("<br>", unsafe_allow_html=True)
+    with st.popover("📖 Manual"):
+        st.markdown("""
+        <div style='font-size: 14px;'>
+        <b>How to Use This App:</b><br><br>
+        <b>1. Training & Validation</b>
+        <ul>
+            <li><b>Upload Data:</b> Provide your historical dataset (CSV or Excel).</li>
+            <li><b>Select Model:</b> Choose from tree-based algorithms, distance models, or deep learning architectures.</li>
+            <li><b>Hyperparameters:</b> Expand the settings menu to customize learning rates, epochs, or layers.</li>
+            <li><b>Column Mapping:</b> Assign your Date, Target, and Input Features.</li>
+            <li><b>Target Engineering:</b> Optionally specify target lags (e.g., <code>1,2,3</code>) or rolling sums (e.g., <code>3,7</code>). Type <code>None</code> to disable.</li>
+            <li>Click <b>Train & Evaluate</b> to generate the hydrograph and download testing/training files.</li>
+        </ul>
+        <b>2. Generate Target (Inference)</b>
+        <ul>
+            <li>After training, scroll to the bottom section.</li>
+            <li>Upload a new dataset containing the exact same input features.</li>
+            <li>Click <b>Generate Target Predictions</b> to download your future forecast.</li>
+        </ul>
+        </div>
+        """, unsafe_allow_html=True)
 
 st.subheader("1. Training & Validation")
 train_file = st.file_uploader("Upload Training Data (CSV or Excel)", type=['csv', 'xlsx'], key="train")
