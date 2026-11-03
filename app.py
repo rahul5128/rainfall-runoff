@@ -143,11 +143,12 @@ with col_manual:
         <b>1. Training & Validation</b>
         <ul>
             <li><b>Upload Data:</b> Provide your historical dataset (CSV or Excel).</li>
-            <li><b>Select Model & Hyperparameters:</b> Choose your architecture and tune the settings.</li>
+            <li><b>Select Model & Split:</b> Choose your architecture and set the Train/Test Split percentage (e.g., 70% Train / 30% Test).</li>
+            <li><b>Hyperparameters:</b> Tune model-specific settings in the expander menu.</li>
             <li><b>Date Encoding:</b> Toggle the checkbox to include or exclude cyclical date features (day_sin, day_cos).</li>
             <li><b>Granular Input Features:</b> Click <b>➕ Add Feature</b> to build your feature set one by one. Select the base column, then choose if it should be used as Raw, a Lag (e.g., Lag 1), or a Rolling Sum (e.g., Rolling 3).</li>
             <li><b>Target Lags:</b> You can select your Target column in the feature list and apply Lags/Rolling Sums to use historical target values as predictors!</li>
-            <li>Click <b>Train & Evaluate</b>.</li>
+            <li>Click <b>Train & Evaluate</b>. <i>(Note: Displayed metrics like R², RMSE, MAE, and PBIAS evaluate the model strictly on the unseen testing data split).</i></li>
         </ul>
         <b>2. Generate Target (Inference)</b>
         <ul>
@@ -179,9 +180,10 @@ if train_file:
                 "SVR", "KNN", "ANN (MLP)"
             ]
         )
+        split_ratio = st.slider("Train/Test Split (%)", min_value=50, max_value=95, value=80, step=5)
     
     with c_m2:
-        with st.expander(f"⚙️ 2. Modify Hyperparameters for {model_type}", expanded=True):
+        with st.expander(f"⚙️ Modify Hyperparameters for {model_type}", expanded=True):
             if model_type == "HistGradientBoosting":
                 hgb_iter = st.number_input("max_iter", value=500, step=50)
                 hgb_lr = st.number_input("learning_rate", value=0.05, step=0.01, format="%.3f")
@@ -304,7 +306,7 @@ if train_file:
                     X = df_clean[engineered_cols]
                     y = df_clean[target_col].values
 
-                    split = int(len(df_clean) * 0.8)
+                    split = int(len(df_clean) * (split_ratio / 100.0))
                     X_train, X_test = X.iloc[:split], X.iloc[split:]
                     y_train, y_test = y[:split], y[split:]
                     train_dates = df_clean[date_col].iloc[:split]
@@ -375,7 +377,7 @@ if train_file:
                     win = int(window_size)
                     X_seq, y_seq = create_sequences(X_scaled, y_scaled, win)
 
-                    split_seq = int(len(X_seq) * 0.8)
+                    split_seq = int(len(X_seq) * (split_ratio / 100.0))
                     X_train, X_test = X_seq[:split_seq], X_seq[split_seq:]
                     y_train_sc, y_test_sc = y_seq[:split_seq], y_seq[split_seq:]
                     
@@ -474,10 +476,10 @@ if train_file:
 
                 st.success(f"Training Complete! Selected Model: {model_type}")
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("R² Score", round(r2, 4))
-                m2.metric("RMSE", round(rmse, 2))
-                m3.metric("MAE", round(mae, 2))
-                m4.metric("PBIAS (%)", f"{round(pbias, 2)}%")
+                m1.metric("Test R² Score", round(r2, 4))
+                m2.metric("Test RMSE", round(rmse, 2))
+                m3.metric("Test MAE", round(mae, 2))
+                m4.metric("Test PBIAS (%)", f"{round(pbias, 2)}%")
 
                 # Hydrograph plot
                 fig, ax = plt.subplots(figsize=(14, 4))
